@@ -189,6 +189,7 @@ select.txt{appearance:auto}
 .gate h1{font-size:20px}
 .gate p{margin:0;font-size:13.5px}
 .gate input{text-align:center;font-size:20px;letter-spacing:.3em;height:46px}
+.kw{position:fixed;z-index:40;background:var(--ink);color:var(--surface);font-size:12.5px;font-weight:500;padding:4px 9px;border-radius:7px;pointer-events:none;white-space:nowrap;max-width:calc(100vw - 32px);overflow:hidden;text-overflow:ellipsis}
 .loading{padding:60px 0;text-align:center;color:var(--muted)}
 footer{font-size:12.5px;color:var(--muted);text-align:center}
 
@@ -211,6 +212,7 @@ footer{font-size:12.5px;color:var(--muted);text-align:center}
 <div class="wrap" id="app"><div class="loading">가계부를 불러오는 중…</div></div>
 <div class="ov" id="ov" hidden></div>
 <div class="toast" id="toast" hidden></div>
+<div class="kw" id="kw" hidden aria-live="polite"></div>
 
 <script>
 (function(){
@@ -348,7 +350,43 @@ function render(){
   let ss=null,se=null,val=null; if(fid&&a.tagName==='INPUT'&&a.type==='text'){val=a.value;try{ss=a.selectionStart;se=a.selectionEnd}catch(e){}}
   app.innerHTML = settingsLoaded ? page() : `<div class="loading">가계부를 불러오는 중…</div>`;
   if(fid){const el=document.getElementById(fid); if(el){ if(val!==null) el.value=val; el.focus({preventScroll:true}); if(ss!==null){try{el.setSelectionRange(ss,se)}catch(e){}} }}
+  updateKw();
 }
+
+/* ---------- 금액 한글 표기 (예: 1,234,000 → 백이십삼만 사천 원) ---------- */
+function hangulWon(n){
+  n=Math.floor(Number(n)||0); if(!n) return '';
+  const D='영일이삼사오육칠팔구', S=['','십','백','천'], G=['','만','억','조','경'];
+  const parts=[]; let g=0;
+  while(n>0 && g<G.length){
+    const v=n%10000; n=Math.floor(n/10000);
+    if(v){
+      let s=''; const ds=String(v).padStart(4,'0');
+      for(let i=0;i<4;i++){const d=+ds[i]; if(!d) continue; const u=S[3-i]; s+=(d===1&&u?'':D[d])+u}
+      if(g===1&&v===1) s='';               // 10,000 → 만
+      parts.unshift(s+G[g]);
+    }
+    g++;
+  }
+  return parts.join(' ')+' 원';
+}
+const kwEl=document.getElementById('kw');
+function updateKw(){
+  const a=document.activeElement;
+  const box=a&&a.tagName==='INPUT'&&a.closest('.money');
+  const txt=box?hangulWon(num(a.value)):'';
+  if(!txt){kwEl.hidden=true;return}
+  kwEl.textContent=txt; kwEl.hidden=false;
+  const r=box.getBoundingClientRect(), w=kwEl.offsetWidth, h=kwEl.offsetHeight;
+  let left=Math.min(r.right-w, window.innerWidth-w-16); left=Math.max(16,left);
+  let top=r.bottom+6; if(top+h>window.innerHeight-8) top=r.top-h-6;
+  kwEl.style.left=left+'px'; kwEl.style.top=top+'px';
+}
+document.addEventListener('focusin',updateKw);
+document.addEventListener('focusout',()=>setTimeout(updateKw,0));
+document.addEventListener('input',()=>setTimeout(updateKw,0));
+window.addEventListener('scroll',updateKw,{passive:true,capture:true});
+window.addEventListener('resize',updateKw);
 
 function page(){
   const C=calc();
