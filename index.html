@@ -58,8 +58,27 @@ input,select{font:inherit;color:var(--ink)}
 .status{font-size:12.5px;color:var(--muted);display:flex;align-items:center;gap:6px}
 .status i{width:7px;height:7px;border-radius:50%;background:var(--muted);display:inline-block}
 .status[data-s="ok"] i{background:var(--good)} .status[data-s="saving"] i{background:var(--c-allow)} .status[data-s="err"] i{background:var(--bad)}
-.monthnav{display:flex;align-items:center;gap:6px}
-.monthnav .mlabel{font-size:20px;font-weight:600;min-width:9.5em;text-align:center;letter-spacing:-.01em}
+.monthnav{display:flex;align-items:center;gap:6px;position:relative}
+.monthnav .mlabel{font-size:20px;font-weight:600;min-width:9.5em;text-align:center;letter-spacing:-.01em;background:none;border:1px solid transparent;border-radius:10px;padding:4px 10px}
+.monthnav .mlabel:hover,.monthnav .mlabel[aria-expanded="true"]{border-color:var(--line);background:var(--surface)}
+.mlabel .caret{font-size:12px;color:var(--muted);vertical-align:2px}
+.picker{position:absolute;top:calc(100% + 8px);right:0;z-index:15;width:min(320px, calc(100vw - 32px));background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px;box-shadow:0 14px 40px rgba(0,0,0,.18);display:flex;flex-direction:column;gap:10px}
+.pk-h{display:flex;align-items:center;justify-content:space-between}
+.pk-h b{font-size:16px;font-weight:700}
+.iconbtn.sm{width:32px;height:32px;font-size:16px}
+.pk-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+.pk-m{position:relative;display:flex;flex-direction:column;align-items:center;gap:1px;border:1px solid var(--line);background:var(--sunk);border-radius:10px;padding:8px 2px 7px;min-height:54px}
+.pk-m b{font-size:14px;font-weight:600}
+.pk-m small{font-size:11.5px;color:var(--muted);font-family:var(--f-num);min-height:1.2em}
+.pk-m.has{background:var(--accent-soft);border-color:transparent}
+.pk-m.has small{color:var(--accent);font-weight:600}
+.pk-m.today{border-color:var(--accent)}
+.pk-m.on{background:var(--accent);border-color:var(--accent)}
+.pk-m.on b,.pk-m.on small{color:var(--accent-ink)}
+.pk-m:hover:not(.on){border-color:var(--accent)}
+.pk-p{position:absolute;top:3px;right:5px;font-style:normal;font-size:9.5px;color:var(--muted);font-family:var(--f-num)}
+.pk-m.on .pk-p{color:var(--accent-ink)}
+.pk-f{display:flex;justify-content:space-between;align-items:center;font-size:12px;gap:8px}
 .iconbtn{width:38px;height:38px;border-radius:50%;border:1px solid var(--line);background:var(--surface);font-size:18px;line-height:1;display:grid;place-items:center}
 .iconbtn:hover{border-color:var(--accent)}
 .btn{border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:7px 14px;font-size:13.5px;font-weight:500;white-space:nowrap}
@@ -221,6 +240,7 @@ footer{font-size:12.5px;color:var(--muted);text-align:center}
   .stats{grid-template-columns:repeat(2,minmax(0,1fr))}
   .stat .v{font-size:20px}
   .monthnav .mlabel{min-width:0;font-size:18px}
+  .picker{right:auto;left:0}
   .panel,.summary{padding:16px}
   .item{grid-template-columns:40px minmax(0,1fr) minmax(0,112px) 30px 30px;gap:6px}
   .srow2{grid-template-columns:44px minmax(0,1fr) auto 30px;gap:8px}
@@ -472,9 +492,10 @@ function page(){
       <span class="status" id="status" data-s="${statusS}"><i></i><em style="font-style:normal">${esc(statusT)}</em></span></div>
     ${step==='setup'?'':`<nav class="monthnav" aria-label="월 이동">
       <button class="iconbtn" data-act="prev" aria-label="이전 달">‹</button>
-      <div class="mlabel">${cur.y}년 ${cur.m}월</div>
+      <button class="mlabel" data-act="pick-month" aria-haspopup="dialog" aria-expanded="${picker?'true':'false'}">${cur.y}년 ${cur.m}월 <span class="caret">▾</span></button>
       <button class="iconbtn" data-act="next" aria-label="다음 달">›</button>
       ${isNow?'':'<button class="btn" data-act="today">이번 달</button>'}
+      ${picker?pickerView():''}
     </nav>`}
   </header>
   <nav class="steps" aria-label="단계">
@@ -748,11 +769,51 @@ function deleteFromModal(){
 let tt;
 function toast(msg){ if(!msg)return; toastEl.textContent=msg; toastEl.hidden=false; clearTimeout(tt); tt=setTimeout(()=>toastEl.hidden=true,2400) }
 
+/* ---------- 월 달력 (월별 조회) ---------- */
+let picker=null;   // {y, info:{'m-YYYY-MM':{total,paid}} | null}
+const isMonthKey=k=>/^m-\d{4}-\d{2}$/.test(k);
+async function loadMonthIndex(){
+  const out={};
+  const add=(k,d)=>{
+    if(!isMonthKey(k)||!d) return;
+    const m=view(d);
+    if(!Object.keys(m.amounts||{}).length && !Object.keys(m.paid||{}).length) return;
+    out[k]={total:settings.fixed.reduce((s,f)=>s+amountOf(f,m),0), paid:settings.fixed.filter(f=>m.paid&&m.paid[f.id]).length};
+  };
+  if(mode==='db'){ try{ const q=await db.collection(`data/users/${uidv}`).get(); q.docs.forEach(d=>d.exists&&add(d.id,d.data())) }catch(e){} }
+  else { for(const k of (await IDB.keys()).filter(isMonthKey)) add(k, await IDB.get(k)) }
+  Object.keys(months).forEach(k=>add(k,months[k]));
+  return out;
+}
+const shortWon=n=>n>=1e8?`${(n/1e8).toFixed(1).replace(/\.0$/,'')}억`:`${Math.round(n/1e4).toLocaleString('ko-KR')}만`;
+function pickerView(){
+  const y=picker.y, info=picker.info, n=settings.fixed.length;
+  let cells='';
+  for(let m=1;m<=12;m++){
+    const k=mkey({y,m}), d=info&&info[k];
+    const on=y===cur.y&&m===cur.m, today=y===now.getFullYear()&&m===now.getMonth()+1;
+    cells+=`<button class="pk-m ${on?'on':''} ${today?'today':''} ${d?'has':''}" data-act="pk-m" data-m="${m}" ${on?'aria-current="date"':''}
+      aria-label="${y}년 ${m}월${d?` 입력됨, ${won(d.total)}원`:''}"><b>${m}월</b><small>${d?shortWon(d.total):info?'—':''}</small>${d&&n?`<i class="pk-p">${d.paid}/${n}</i>`:''}</button>`;
+  }
+  return `<div class="picker" role="dialog" aria-label="월 선택">
+    <div class="pk-h"><button class="iconbtn sm" data-act="pk-y" data-d="-1" aria-label="이전 해">‹</button><b>${y}년</b><button class="iconbtn sm" data-act="pk-y" data-d="1" aria-label="다음 해">›</button></div>
+    <div class="pk-grid">${cells}</div>
+    <div class="pk-f"><span class="muted">${info?'<i class="dot" style="background:var(--accent)"></i>입력한 달 · 합계(이체 완료)':'불러오는 중…'}</span><button class="link" data-act="today">이번 달</button></div>
+  </div>`;
+}
+
 /* ---------- events ---------- */
 const acts={
-  prev(){cur=shift(cur,-1);watchMonths()},
-  next(){cur=shift(cur,1);watchMonths()},
-  today(){cur={y:now.getFullYear(),m:now.getMonth()+1};watchMonths()},
+  prev(){picker=null;cur=shift(cur,-1);watchMonths()},
+  next(){picker=null;cur=shift(cur,1);watchMonths()},
+  today(){picker=null;cur={y:now.getFullYear(),m:now.getMonth()+1};watchMonths()},
+  'pick-month'(){
+    if(picker){picker=null;render();return}
+    picker={y:cur.y,info:null}; render();
+    loadMonthIndex().then(info=>{ if(picker){picker.info=info;render()} });
+  },
+  'pk-y'(b){ if(picker){picker.y+=Number(b.dataset.d);render()} },
+  'pk-m'(b){ const m=Number(b.dataset.m); cur={y:picker.y,m}; picker=null; watchMonths(); },
   step(b){
     step=b.dataset.step; try{localStorage.setItem(LS+'step',step)}catch(_){}
     try{history.replaceState(null,'','#'+step)}catch(_){}
@@ -795,13 +856,18 @@ const acts={
 };
 document.addEventListener('click',e=>{
   if(e.target===ov){ closeModal(); return }
+  if(picker && !e.target.closest('.monthnav')){ picker=null; render() }
   const b=e.target.closest('[data-act]'); if(!b||b.disabled) return;
   const fn=acts[b.dataset.act]; if(fn){e.preventDefault(); fn(b)}
 });
 ov.addEventListener('submit',e=>{ e.preventDefault(); saveModal() });
 ov.addEventListener('change',e=>{ if(e.target.name==='f-cat'&&modal){ modal.v={...modal.v,...readItemForm()}; const fid=e.target.value; drawModal(); const r=ov.querySelector(`input[name="f-cat"][value="${fid}"]`); r&&r.focus() } });
 ov.addEventListener('input',e=>{ if(e.target.id==='f-amount'){const v=num(e.target.value);e.target.value=v?won(v):''} });
-document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&modal){ acts['m-close']() } });
+document.addEventListener('keydown',e=>{
+  if(e.key!=='Escape') return;
+  if(modal){ acts['m-close'](); return }
+  if(picker){ picker=null; render(); const l=app.querySelector('.mlabel'); l&&l.focus() }
+});
 
 app.addEventListener('input',e=>{
   const t=e.target, bind=t.dataset.bind; if(bind!=='amt') return;
