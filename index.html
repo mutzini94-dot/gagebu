@@ -149,8 +149,6 @@ input,select{font:inherit;color:var(--ink)}
 .srow2 .base{font-weight:600;white-space:nowrap}
 .note{font-size:13px;background:var(--accent-soft);padding:8px 12px;border-radius:8px}
 .nextbar{display:flex;justify-content:flex-end}
-.opts{display:flex;flex-wrap:wrap;gap:6px 16px}
-.opt{display:flex;gap:6px;align-items:center;font-size:13.5px}
 .sharepanel{max-width:640px;width:100%;margin:0 auto}
 .sharepanel .sharebox{height:min(60vh,520px)}
 
@@ -286,6 +284,34 @@ const amountOf=(f,m)=>{const o=m.amounts&&m.amounts[f.id];return (typeof o==='nu
 const LS='household-ledger-v1:';
 function lsGet(k){try{const v=localStorage.getItem(LS+k);return v?JSON.parse(v):null}catch(e){return null}}
 function lsSet(k,v){try{localStorage.setItem(LS+k,JSON.stringify(v));return true}catch(e){return false}}
+// 기기 내부 DB(IndexedDB). localStorage에도 같이 적어 둔다
+const IDB={
+  open(){
+    if(this.p) return this.p;
+    this.p=new Promise(res=>{
+      const t=setTimeout(()=>res(null),3000);
+      try{
+        const r=indexedDB.open('household-ledger',1);
+        r.onupgradeneeded=()=>r.result.createObjectStore('kv');
+        r.onsuccess=()=>{clearTimeout(t);res(r.result)};
+        r.onerror=r.onblocked=()=>{clearTimeout(t);res(null)};
+      }catch(e){clearTimeout(t);res(null)}
+    });
+    return this.p;
+  },
+  async req(mode,fn){
+    const d=await this.open(); if(!d) throw new Error('no idb');
+    return new Promise((res,rej)=>{const tx=d.transaction('kv',mode);const q=fn(tx.objectStore('kv'));tx.oncomplete=()=>res(q&&q.result);tx.onerror=tx.onabort=()=>rej(tx.error)});
+  },
+  async get(k){ try{const v=await this.req('readonly',st=>st.get(k)); if(v!==undefined&&v!==null) return v}catch(e){} return lsGet(k) },
+  async set(k,v){ const a=lsSet(k,v); let b=false; try{await this.req('readwrite',st=>st.put(v,k)); b=true}catch(e){} return a||b },
+  async keys(){
+    let ks=[]; try{ks=await this.req('readonly',st=>st.getAllKeys())||[]}catch(e){}
+    try{for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i); if(k&&k.startsWith(LS)) ks.push(k.slice(LS.length))}}catch(e){}
+    return [...new Set(ks.map(String))];
+  }
+};
+try{ navigator.storage&&navigator.storage.persist&&navigator.storage.persist() }catch(e){}
 const docPath=k=>`data/users/${uidv}/${k}`;
 const timers={}, chains={};
 function persist(k,delay=450){
@@ -293,18 +319,19 @@ function persist(k,delay=450){
   timers[k]=setTimeout(()=>{
     delete timers[k];
     const data=clone(k==='settings'?settings:(months[k]||{}));
+    const local=IDB.set(k,data);   // 계정 DB를 쓸 때도 기기에 백업
     if(mode==='db'){
       chains[k]=(chains[k]||Promise.resolve()).then(()=>db.doc(docPath(k)).set(data))
         .then(()=>{ if(!Object.keys(timers).length) setStatus('ok') })
         .catch(e=>{ setStatus('err'); toast(e&&e.code==='quota_exceeded'?'저장 공간이 가득 찼어요. 오래된 달 기록을 정리해 주세요.':'저장하지 못했어요. 잠시 후 다시 입력해 주세요.') });
     }else{
-      lsSet(k,data)?setStatus('ok'):setStatus('err');
+      local.then(ok=>{ if(!ok){setStatus('err');toast('이 기기에 저장하지 못했어요. 브라우저 저장 공간 설정을 확인해 주세요.')} else if(!Object.keys(timers).length) setStatus('ok') });
     }
   },delay);
 }
 function setStatus(s){
   statusS=s;
-  const where = mode==='db' ? '내 계정에 저장 · 나만 볼 수 있음' : '이 브라우저에만 저장됨';
+  const where = mode==='db' ? '내 계정 DB에 저장 · 나만 볼 수 있음' : '이 기기 내부 DB에 저장됨';
   statusT = s==='saving' ? '저장 중…' : s==='err' ? '저장 실패' : where;
   const el=document.getElementById('status'); if(el){el.dataset.s=s;el.querySelector('em').textContent=statusT}
 }
@@ -323,7 +350,7 @@ function watchMonths(){
       },()=>setStatus('err')));
     });
   }else{
-    keys.forEach(k=>{ if(!(k in months)) months[k]=lsGet(k) });
+    Promise.all(keys.filter(k=>!(k in months)).map(async k=>{ const v=await IDB.get(k); if(!(k in months)) months[k]=v||null })).then(render);
   }
   render();
 }
@@ -339,14 +366,29 @@ async function boot(){
   }
   if(mode==='db'){
     setStatus('ok');
-    db.doc(docPath('settings')).onSnapshot(s=>{
+    let migrated=false;
+    db.doc(docPath('settings')).onSnapshot(async s=>{
       if(timers.settings) return;
+      // 계정 DB가 비어 있으면 이 기기에 저장돼 있던 데이터를 계정 DB로 옮긴다
+      if(!s.exists && !s.metadata.fromCache && !migrated){
+        migrated=true;
+        const loc=normSettings(await IDB.get('settings'));
+        if(loc.fixed.length||loc.accounts.length){
+          settings=loc; settingsLoaded=true; persist('settings',0);
+          for(const k of (await IDB.keys()).filter(k=>/^m-\d{4}-\d{2}$/.test(k))){
+            const v=await IDB.get(k); if(!v) continue;
+            months[k]=v; try{await db.doc(docPath(k)).set(v)}catch(e){}
+          }
+          render(); toast('이 기기에 있던 데이터를 계정 DB에 저장했어요');
+          return;
+        }
+      }
       const d=normSettings(s.exists?clone(s.data()):null);
       if(settingsLoaded && JSON.stringify(d)===JSON.stringify(settings)) return;
       settings=d; settingsLoaded=true; render();
     },()=>{ setStatus('err') });
   }else{
-    mode='local'; settings=normSettings(lsGet('settings')); settingsLoaded=true; setStatus('ok');
+    mode='local'; settings=normSettings(await IDB.get('settings')); settingsLoaded=true; setStatus('ok');
   }
   watchMonths();
 }
@@ -414,7 +456,6 @@ window.addEventListener('resize',updateKw);
 
 const STEPS=[{k:'setup',n:'고정비 등록'},{k:'month',n:'이번 달 입력'},{k:'share',n:'요약 공유'}];
 let step=(()=>{const h=(location.hash||'').slice(1);if(STEPS.some(s=>s.k===h))return h;try{const v=localStorage.getItem(LS+'step');if(STEPS.some(s=>s.k===v))return v}catch(e){}return 'setup'})();
-let shareOpts=(()=>{let o={detail:true,acc:true,upcoming:true};try{o={...o,...JSON.parse(localStorage.getItem(LS+'share-opts')||'{}')}}catch(e){}return o})();
 
 function page(){
   const C=calc();
@@ -527,12 +568,9 @@ function summary(C){
 
 /* ③ 요약 공유 */
 function shareView(C){
-  const o=shareOpts;
-  const opt=(k,t)=>`<label class="opt"><input type="checkbox" id="so-${k}" data-opt="${k}" ${o[k]?'checked':''}>${t}</label>`;
   return `<section class="panel sharepanel" aria-labelledby="h-share">
     <div class="ph"><h2 id="h-share">${cur.y}년 ${cur.m}월 고정비 요약</h2><span class="tot">${won(C.fixed)}원</span></div>
-    <div class="opts">${opt('detail','항목별 내역')}${opt('acc','계좌 표시')}${opt('upcoming','다가오는 이체')}</div>
-    <textarea class="txt sharebox" id="share-text" readonly aria-label="요약 텍스트">${esc(shareText(o))}</textarea>
+    <textarea class="txt sharebox" id="share-text" readonly aria-label="요약 텍스트">${esc(shareText())}</textarea>
     <div class="mfoot"><span class="muted" style="font-size:12.5px">복사한 뒤 카카오톡이나 문자에 붙여넣으세요.</span><span class="sp"></span>
       <button class="btn primary" data-act="copy-share">텍스트 복사</button></div>
   </section>`;
@@ -616,35 +654,16 @@ let modal=null;
 function openModal(o){modal=o;drawModal();ov.hidden=false;setTimeout(()=>{const f=ov.querySelector('[data-first]');f&&f.focus()},0)}
 function closeModal(){modal=null;ov.hidden=true;ov.innerHTML=''}
 function dayOptions(sel){let h='';for(let d=1;d<=31;d++)h+=`<option value="${d}" ${+sel===d?'selected':''}>${d}일</option>`;return h+`<option value="0" ${+sel===0?'selected':''}>말일</option>`}
-function shareText(o){
+function shareText(){
   const C=calc(), L=[];
-  const line='━━━━━━━━━━━━';
   const accTxt=id=>accName(id)||'계좌 미지정';
-  L.push(`📒 ${cur.y}년 ${cur.m}월 고정비`, line);
+  L.push(`📒 ${cur.y}년 ${cur.m}월 고정비`, '━━━━━━━━━━━━');
   L.push(`💳 합계  ${won(C.fixed)}원 (${C.items.length}건)`, '');
   CATS.forEach(c=>{
     const b=C.byCat[c.k]; if(!b.items.length) return;
     L.push(`[${c.n}] ${won(b.sum)}원`);
-    if(o.detail) b.items.forEach(it=>L.push(` ${it.paid?'✅':'⬜'} ${it.day}일 ${it.f.name} ${won(it.amt)}원${o.acc?` (${accTxt(it.f.accountId)})`:''}`));
+    b.items.forEach(it=>L.push(` ${it.paid?'✅':'⬜'} ${it.day}일 ${it.f.name} ${won(it.amt)}원 (${accTxt(it.f.accountId)})`));
   });
-  L.push(line);
-  if(C.byCat.save.sum) L.push(`🐷 이 중 저축 ${won(C.byCat.save.sum)}원`);
-  L.push(`📌 이체 ${C.paidN}/${C.items.length}건 완료 · 남은 이체 ${won(C.fixed-C.paidAmt)}원`);
-  if(o.acc && C.items.length){
-    L.push('', '🏦 계좌별 필요 금액');
-    const ids=[...settings.accounts.map(a=>a.id), null];
-    ids.forEach(id=>{
-      const its=C.items.filter(i=>id===null?!settings.accounts.some(a=>a.id===i.f.accountId):i.f.accountId===id);
-      if(!its.length) return;
-      const tot=its.reduce((s,i)=>s+i.amt,0), rest=its.filter(i=>!i.paid).reduce((s,i)=>s+i.amt,0);
-      L.push(` · ${id===null?'계좌 미지정':accTxt(id)} ${won(tot)}원${rest&&rest!==tot?` (남은 ${won(rest)}원)`:rest===0?' (완료)':''}`);
-    });
-  }
-  if(o.upcoming){
-    const isNow=cur.y===now.getFullYear()&&cur.m===now.getMonth()+1;
-    const up=C.items.filter(i=>!i.paid && (!isNow || i.day>=now.getDate())).sort((a,b)=>a.day-b.day).slice(0,5);
-    if(up.length){ L.push('', '⏰ 다가오는 이체'); up.forEach(i=>L.push(` · ${i.day}일(${WD[wdOf(cur,i.day)]}) ${i.f.name} ${won(i.amt)}원`)); }
-  }
   return L.join('\n');
 }
 function drawModal(){
@@ -794,11 +813,6 @@ app.addEventListener('input',e=>{
 app.addEventListener('focusout',e=>{ const t=e.target; if(t.dataset&&t.dataset.bind==='amt'){ setTimeout(()=>{ if(!app.contains(document.activeElement)||document.activeElement!==t) render() },0) } });
 app.addEventListener('change',e=>{
   const t=e.target;
-  if(t.dataset.opt){
-    shareOpts[t.dataset.opt]=t.checked; try{localStorage.setItem(LS+'share-opts',JSON.stringify(shareOpts))}catch(_){}
-    const ta=document.getElementById('share-text'); if(ta) ta.value=shareText(shareOpts);
-    return;
-  }
   if(t.dataset.bind!=='paid') return;
   const k=mkey(cur), m=ensure(k);
   if(t.checked) m.paid[t.dataset.id]=true; else delete m.paid[t.dataset.id];
