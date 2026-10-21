@@ -513,7 +513,7 @@ function setupView(C){
         return `<div class="cat">
         <div class="cat-h"><h3><i class="dot" style="background:var(--c-${c.k})"></i>${c.n}</h3><span class="cnt">${list.length}건</span>
           <button class="link" style="margin-left:auto" data-act="add-item" data-cat="${c.k}">+ ${c.n} 추가</button></div>
-        <div class="items">${list.length?list.map(f=>{const acc=accName(f.accountId);return `<div class="srow2">
+        <div class="items">${list.length?list.map(f=>{const acc=accLabel(f.accountId);return `<div class="srow2">
           <div class="day"><b>${f.day===0?'말일':f.day}</b><small>${f.day===0?'매달':'매달 일'}</small></div>
           <div style="min-width:0"><div class="iname">${esc(f.name)}${f.sample?'<span class="chip">예시</span>':''}</div>
             <div class="imeta">${acc?esc(acc):'<span class="chip warn" style="margin-left:0">입금계좌 미지정</span>'}</div></div>
@@ -577,6 +577,8 @@ function shareView(C){
 }
 
 function accName(id){const a=settings.accounts.find(x=>x.id===id);return a?(a.alias||a.bank):null}
+// 별칭 + 계좌번호 (예: 권준호_하나 123-456-789)
+function accLabel(id){const a=settings.accounts.find(x=>x.id===id);if(!a)return null;const nm=a.alias||a.bank;return a.number?nm+" "+a.number:nm}
 
 function fixedPanel(C){
   const prev=months[mkey(shift(cur,-1))];
@@ -595,7 +597,7 @@ function fixedPanel(C){
 }
 function itemRow(it,C){
   const f=it.f, wd=wdOf(cur,it.day), we=wd===0||wd===6;
-  const acc=accName(f.accountId);
+  const acc=accLabel(f.accountId);
   const over=typeof (C.m&&C.m.amounts&&C.m.amounts[f.id])==='number';
   return `<div class="item ${it.paid?'paid':''}">
     <div class="day ${we?'we':''}" title="${f.day===0?'매달 말일':'매달 '+f.day+'일'}${we?' · 주말이라 다음 영업일에 처리될 수 있어요':''}"><b>${it.day}</b><small>${f.day===0?'말일':WD[wd]}</small></div>
@@ -619,7 +621,7 @@ function schedulePanel(C,isNow){
       return `<div class="srow ${we?'we':''} ${d===nextDay?'next':''}">
         <div class="sdate">${d}일<small>${WD[wd]}요일${d===nextDay?' · 다음':''}</small></div>
         <div class="slist">${list.map(i=>{const late=isNow&&!i.paid&&d<today;return `<div class="sitem ${i.paid?'done':''} ${late?'late':''}">
-          <i class="dot" style="background:var(--c-${i.f.cat})"></i><span class="nm">${esc(i.f.name)} <span class="muted">· ${esc(accName(i.f.accountId)||'계좌 미지정')}</span></span><span class="am">${won(i.amt)}</span></div>`}).join('')}
+          <i class="dot" style="background:var(--c-${i.f.cat})"></i><span class="nm">${esc(i.f.name)} <span class="muted">· ${esc(accLabel(i.f.accountId)||'계좌 미지정')}</span></span><span class="am">${won(i.amt)}</span></div>`}).join('')}
           ${list.length>1?`<div class="stot">합계 ${won(sum)}원</div>`:''}</div>
       </div>`}).join('')}</div>
   </section>`;
@@ -656,7 +658,7 @@ function closeModal(){modal=null;ov.hidden=true;ov.innerHTML=''}
 function dayOptions(sel){let h='';for(let d=1;d<=31;d++)h+=`<option value="${d}" ${+sel===d?'selected':''}>${d}일</option>`;return h+`<option value="0" ${+sel===0?'selected':''}>말일</option>`}
 function shareText(){
   const C=calc(), L=[];
-  const accTxt=id=>accName(id)||'계좌 미지정';
+  const accTxt=id=>accLabel(id)||'계좌 미지정';
   L.push(`📒 ${cur.y}년 ${cur.m}월 고정비`, '━━━━━━━━━━━━');
   L.push(`💳 합계  ${won(C.fixed)}원 (${C.items.length}건)`, '');
   CATS.forEach(c=>{
@@ -681,7 +683,7 @@ function drawModal(){
         <label class="field"><span>입금일</span><select class="txt" id="f-day">${dayOptions(v.day)}</select>
           <span class="hint">짧은 달은 말일로 맞춰요.</span></label>
       </div>
-      <label class="field"><span>입금계좌</span><select class="txt" id="f-acc"><option value="">선택 안 함</option>${settings.accounts.map(a=>`<option value="${esc(a.id)}" ${v.accountId===a.id?'selected':''}>${esc(a.alias||a.bank)}${a.alias&&a.bank?' · '+esc(a.bank):''}</option>`).join('')}</select>
+      <label class="field"><span>입금계좌</span><select class="txt" id="f-acc"><option value="">선택 안 함</option>${settings.accounts.map(a=>`<option value="${esc(a.id)}" ${v.accountId===a.id?'selected':''}>${esc(a.alias||a.bank)}${a.alias&&a.bank?' · '+esc(a.bank):''}${a.number?' '+esc(a.number):''}</option>`).join('')}</select>
         <button type="button" class="link" style="align-self:flex-start" data-act="acc-from-item">+ 새 계좌 등록</button></label>
       <div class="err" id="merr"></div>
       <div class="mfoot">
