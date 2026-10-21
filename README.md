@@ -6,8 +6,9 @@
 2. **이번 달 입력**: 이번 달 금액을 확인·수정하고 이체 완료 체크 (지난달 금액 가져오기 지원)
 3. **요약 공유**: 그 달 고정비 요약을 텍스트로 복사해 카카오톡·문자로 공유
 
-- `index.html`: 브라우저에서 바로 여는 독립 실행 파일 (GitHub Pages용). 데이터는 그 브라우저에 저장됩니다.
-- `budget.html`: claude.ai Artifact 게시용 원본. 로그인한 내 계정에 비공개로 저장됩니다.
+- `index.html`: 브라우저에서 바로 여는 독립 실행 파일 (GitHub Pages용). 데이터는 Supabase 서버에 저장되고, 기기 내부 DB(IndexedDB)에 백업됩니다. 서버에 연결되지 않으면 기기에 저장해 두었다가 다음 연결 때 올립니다.
+- `budget.html`: claude.ai Artifact 게시용 원본. 로그인한 내 계정에 비공개로 저장됩니다. (claude.ai는 외부 서버 접속을 막아 Supabase를 쓰지 않습니다.)
+- `supabase/schema.sql`: Supabase 테이블과 함수. SQL Editor에서 실행합니다.
 
 `index.html`은 `budget.html`을 HTML 문서 뼈대로 감싼 것이므로, 수정은 `budget.html`에서 하고 `index.html`을 다시 만들어 주세요.
 

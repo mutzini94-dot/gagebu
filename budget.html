@@ -325,6 +325,77 @@ const IDB={
 };
 try{ navigator.storage&&navigator.storage.persist&&navigator.storage.persist() }catch(e){}
 const docPath=k=>`data/users/${uidv}/${k}`;
+
+/* ---------- Supabase 서버 DB (claude.ai 밖, 예: GitHub Pages에서 사용) ---------- */
+const SB_URL='https://ttwkyqqvudbjmlqykcyt.supabase.co';
+const SB_KEY='sb_publishable_0dW0OFqfY5owFvXOYFRqsw_z_WNZl8d';   // 공개용(publishable) 키
+let sbFailed=false;
+function sbPass(){try{return sessionStorage.getItem(LS+'pw')||''}catch(e){return ''}}
+async function sbRpc(fn,body){
+  const ctl=new AbortController(), t=setTimeout(()=>ctl.abort(),8000);
+  try{
+    const r=await fetch(`${SB_URL}/rest/v1/rpc/${fn}`,{method:'POST',headers:{apikey:SB_KEY,'Content-Type':'application/json'},body:JSON.stringify(body),signal:ctl.signal});
+    const j=await r.json().catch(()=>null);
+    if(!r.ok){const e=new Error((j&&j.message)||('HTTP '+r.status));e.status=r.status;throw e}
+    return j;
+  }finally{clearTimeout(t)}
+}
+// 아직 서버에 못 보낸 문서 목록 (새로고침해도 남도록 기기에 보관)
+const sbDirty=new Set((()=>{try{return JSON.parse(localStorage.getItem(LS+'sb-pending')||'[]')}catch(e){return []}})());
+function saveDirty(){try{localStorage.setItem(LS+'sb-pending',JSON.stringify([...sbDirty]))}catch(e){}}
+const docOf=k=>clone(k==='settings'?settings:(months[k]||{}));
+function sbFlush(){
+  [...sbDirty].forEach(k=>{
+    chains[k]=(chains[k]||Promise.resolve()).then(()=>sbDirty.has(k)?sbRpc('ledger_put',{p_pass:sbPass(),p_key:k,p_data:docOf(k)}):null)
+      .then(()=>{ sbDirty.delete(k); saveDirty(); if(!Object.keys(timers).length&&!sbDirty.size) setStatus('ok') })
+      .catch(e=>{ setStatus('err'); toast(e.status===403?'서버 비밀번호가 맞지 않아 저장하지 못했어요.':'서버에 저장하지 못했어요. 이 기기에는 저장돼 있고, 연결되면 다시 보낼게요.') });
+  });
+}
+async function sbBoot(){
+  try{
+    const rows=await sbRpc('ledger_get',{p_pass:sbPass()});
+    const remote={}; (rows||[]).forEach(r=>{remote[r.key]=r.data});
+    mode='sb'; sbFailed=false;
+    const rs=normSettings(remote.settings);
+    if(!rs.fixed.length&&!rs.accounts.length){
+      // 서버가 비어 있으면 이 기기에 있던 데이터를 올린다
+      const loc=normSettings(await IDB.get('settings'));
+      if(loc.fixed.length||loc.accounts.length){
+        settings=loc; sbDirty.add('settings');
+        for(const k of (await IDB.keys()).filter(isMonthKey)){ const v=await IDB.get(k); if(v){ months[k]=v; sbDirty.add(k) } }
+        saveDirty(); sbFlush(); toast('이 기기에 있던 데이터를 서버에 저장했어요');
+      }
+    }else{
+      settings=normSettings(remote.settings);
+      Object.keys(remote).filter(isMonthKey).forEach(k=>{ months[k]=remote[k] });
+      Object.entries(remote).forEach(([k,v])=>{ if(!sbDirty.has(k)) IDB.set(k,v) });   // 서버 내용을 기기에 백업
+      // 연결이 끊긴 동안 기기에서 바꾼 문서는 기기 쪽을 올린다
+      for(const k of [...sbDirty]){ const v=await IDB.get(k); if(v){ if(k==='settings') settings=normSettings(v); else months[k]=v } else sbDirty.delete(k) }
+      saveDirty(); if(sbDirty.size) sbFlush();
+    }
+    settingsLoaded=true; setStatus('ok');
+  }catch(e){
+    sbFailed=true;
+    if(e&&e.status===403) toast('서버 비밀번호가 맞지 않아요. 이 기기에만 저장합니다.');
+  }
+}
+// 다른 기기에서 바꾼 내용을 화면으로 돌아올 때 다시 불러온다
+async function sbRefresh(){
+  if(mode!=='sb'||Object.keys(timers).length||sbDirty.size||modal) return;
+  try{
+    const rows=await sbRpc('ledger_get',{p_pass:sbPass()});
+    if(Object.keys(timers).length||sbDirty.size) return;
+    let changed=false;
+    (rows||[]).forEach(r=>{
+      if(r.key==='settings'){ const d=normSettings(r.data); if(JSON.stringify(d)!==JSON.stringify(settings)){settings=d;changed=true} }
+      else if(isMonthKey(r.key) && JSON.stringify(months[r.key])!==JSON.stringify(r.data)){ months[r.key]=r.data; changed=true }
+      IDB.set(r.key,r.data);
+    });
+    if(changed) render();
+  }catch(e){}
+}
+document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible') sbRefresh() });
+window.addEventListener('online',()=>{ if(mode==='sb'&&sbDirty.size) sbFlush() });
 const timers={}, chains={};
 function persist(k,delay=450){
   clearTimeout(timers[k]); setStatus('saving');
@@ -336,14 +407,17 @@ function persist(k,delay=450){
       chains[k]=(chains[k]||Promise.resolve()).then(()=>db.doc(docPath(k)).set(data))
         .then(()=>{ if(!Object.keys(timers).length) setStatus('ok') })
         .catch(e=>{ setStatus('err'); toast(e&&e.code==='quota_exceeded'?'저장 공간이 가득 찼어요. 오래된 달 기록을 정리해 주세요.':'저장하지 못했어요. 잠시 후 다시 입력해 주세요.') });
+    }else if(mode==='sb'){
+      sbDirty.add(k); saveDirty(); sbFlush();
     }else{
+      if(sbPass()){ sbDirty.add(k); saveDirty() }   // 서버에 못 붙은 동안 바뀐 것은 다음 연결 때 올린다
       local.then(ok=>{ if(!ok){setStatus('err');toast('이 기기에 저장하지 못했어요. 브라우저 저장 공간 설정을 확인해 주세요.')} else if(!Object.keys(timers).length) setStatus('ok') });
     }
   },delay);
 }
 function setStatus(s){
   statusS=s;
-  const where = mode==='db' ? '내 계정 DB에 저장 · 나만 볼 수 있음' : '이 기기 내부 DB에 저장됨';
+  const where = mode==='db' ? '내 계정 DB에 저장 · 나만 볼 수 있음' : mode==='sb' ? '서버(Supabase)에 저장됨' : sbFailed ? '서버 연결 안 됨 · 이 기기에 저장됨' : '이 기기 내부 DB에 저장됨';
   statusT = s==='saving' ? '저장 중…' : s==='err' ? '저장 실패' : where;
   const el=document.getElementById('status'); if(el){el.dataset.s=s;el.querySelector('em').textContent=statusT}
 }
@@ -400,7 +474,8 @@ async function boot(){
       settings=d; settingsLoaded=true; render();
     },()=>{ setStatus('err') });
   }else{
-    mode='local'; settings=normSettings(await IDB.get('settings')); settingsLoaded=true; setStatus('ok');
+    if(sbPass()) await sbBoot();
+    if(mode!=='sb'){ mode='local'; settings=normSettings(await IDB.get('settings')); settingsLoaded=true; setStatus('ok'); }
   }
   watchMonths();
 }
@@ -908,7 +983,7 @@ function sha256js(bytes){
   }
   return H.map(v=>v.toString(16).padStart(8,'0')).join('');
 }
-function unlocked(){try{return sessionStorage.getItem(LS+'unlocked')===PASS_HASH}catch(e){return false}}
+function unlocked(){try{return sessionStorage.getItem(LS+'unlocked')===PASS_HASH && !!sessionStorage.getItem(LS+'pw')}catch(e){return false}}
 function showGate(){
   app.innerHTML=`<form class="gate" id="gate" autocomplete="off">
     <h1>고정비 가계부</h1>
@@ -922,7 +997,7 @@ function showGate(){
   f.addEventListener('submit',async e=>{
     e.preventDefault();
     const h=await sha256(pw.value);
-    if(h===PASS_HASH){ try{sessionStorage.setItem(LS+'unlocked',PASS_HASH)}catch(_){}; app.innerHTML='<div class="loading">가계부를 불러오는 중…</div>'; boot(); }
+    if(h===PASS_HASH){ try{sessionStorage.setItem(LS+'unlocked',PASS_HASH);sessionStorage.setItem(LS+'pw',pw.value)}catch(_){}; app.innerHTML='<div class="loading">가계부를 불러오는 중…</div>'; boot(); }
     else { err.textContent='비밀번호가 맞지 않아요.'; pw.value=''; pw.focus(); }
   });
 }
